@@ -59,7 +59,7 @@ AI Gatekeeper System
 ### Prerequisites
 
 - Python 3.8+
-- OpenAI API key
+- OpenAI/Helpdesk API key
 - Vector database (ChromaDB)
 - Optional: Slack workspace and bot token
 
