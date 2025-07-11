@@ -18,6 +18,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared_agents'))
 
 from shared_agents.core.agent_factory import AgentBase, AgentResponse, AgentCapability
 from shared_agents.config.shared_config import SharedConfig
+from core.confidence_agent import ConfidenceAgent, ConfidenceResult
+from core.advanced_agent_manager import AdvancedAgentManager
 
 
 class SupportRequestPriority(Enum):
@@ -74,6 +76,8 @@ class SupportRequestProcessor:
         # Initialize agent connections (will be injected from existing system)
         self.agent_manager = None
         self.search_system = None
+        self.confidence_agent = None
+        self.advanced_agent_manager = None
         
     def set_agent_manager(self, agent_manager):
         """Set the agent manager from existing unified system."""
@@ -82,6 +86,14 @@ class SupportRequestProcessor:
     def set_search_system(self, search_system):
         """Set the search system for knowledge base operations."""
         self.search_system = search_system
+    
+    def set_confidence_agent(self, confidence_agent: ConfidenceAgent):
+        """Set the confidence agent for advanced scoring."""
+        self.confidence_agent = confidence_agent
+    
+    def set_advanced_agent_manager(self, advanced_agent_manager: AdvancedAgentManager):
+        """Set the advanced agent manager with swarm intelligence."""
+        self.advanced_agent_manager = advanced_agent_manager
     
     async def process_support_request(self, message: str, user_context: Dict[str, Any]) -> SupportRequest:
         """
@@ -138,6 +150,27 @@ class SupportRequestProcessor:
         return request
     
     async def _perform_triage_evaluation(self, request: SupportRequest) -> Dict[str, Any]:
+        """Use confidence agent for evaluation."""
+        
+        if not self.confidence_agent:
+            # Fallback to original logic
+            return await self._perform_original_triage_evaluation(request)
+        
+        # Use confidence agent
+        confidence_result = await self.confidence_agent.score_confidence(
+            request.message, 
+            request.user_context
+        )
+        
+        return {
+            'confidence_score': confidence_result.confidence_score,
+            'risk_score': self._calculate_risk_score_from_confidence(confidence_result),
+            'confidence_analysis': confidence_result,
+            'primary_matches': confidence_result.primary_matches,
+            'reasoning': confidence_result.reasoning
+        }
+    
+    async def _perform_original_triage_evaluation(self, request: SupportRequest) -> Dict[str, Any]:
         """
         Use existing TriageAgent to evaluate support request.
         
@@ -245,6 +278,23 @@ class SupportRequestProcessor:
             base_risk -= 0.2
         
         return max(0.0, min(1.0, base_risk))
+    
+    def _calculate_risk_score_from_confidence(self, confidence_result: ConfidenceResult) -> float:
+        """Calculate risk based on confidence factors"""
+        base_risk = 1.0 - confidence_result.confidence_score
+        
+        # Adjust based on factors
+        factors = confidence_result.factors
+        
+        # Higher risk for complex requests
+        if factors.get('complexity', 1.0) < 0.7:
+            base_risk += 0.2
+        
+        # Higher risk for unclear requests
+        if factors.get('clarity', 1.0) < 0.5:
+            base_risk += 0.1
+        
+        return min(1.0, base_risk)
     
     def _determine_resolution_path(self, request: SupportRequest) -> str:
         """

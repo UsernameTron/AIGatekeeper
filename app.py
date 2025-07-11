@@ -6,12 +6,81 @@ A standalone support ticketing automation system
 
 import os
 import sys
+import asyncio
 from flask import Flask, jsonify
 from flask_cors import CORS
 
 # Add project paths
 sys.path.append(os.path.dirname(__file__))
 sys.path.append(os.path.join(os.path.dirname(__file__), 'shared_agents'))
+
+# Add imports
+from core.confidence_agent import ConfidenceAgent
+from knowledge.knowledge_loader import KnowledgeLoader
+from core.advanced_agent_manager import AdvancedAgentManager
+from agents import *  # Auto-registers agents
+import openai
+
+async def initialize_confidence_agent(app):
+    """Initialize confidence agent with knowledge base"""
+    
+    # Create OpenAI client
+    openai_client = openai.AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    
+    # Create confidence agent
+    confidence_agent = ConfidenceAgent(openai_client)
+    
+    # Load knowledge base
+    knowledge_items = await KnowledgeLoader.load_sample_knowledge()
+    await confidence_agent.load_knowledge_base(knowledge_items)
+    
+    # Set in support processor
+    if hasattr(app, 'support_processor'):
+        app.support_processor.set_confidence_agent(confidence_agent)
+    
+    print("✅ Confidence agent initialized with knowledge base")
+    return confidence_agent
+
+async def initialize_advanced_agents(app):
+    """Initialize advanced agent system"""
+    
+    openai_client = openai.AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    
+    config = {
+        'openai_client': openai_client,
+        'model': 'gpt-4o',
+        'fast_model': 'gpt-4o-mini'
+    }
+    
+    # Create advanced agent manager
+    agent_manager = AdvancedAgentManager(openai_client, config)
+    
+    # Create and register agents
+    from shared_agents.core.agent_factory import AgentFactory
+    
+    agents_config = {**config, 'search_system': getattr(app, 'search_system', None)}
+    
+    triage_agent = AgentFactory.create_agent('triage', {**agents_config, 'name': 'Production Triage', 'agent_type': 'triage'})
+    research_agent = AgentFactory.create_agent('research', {**agents_config, 'name': 'Production Research', 'agent_type': 'research'})
+    confidence_agent = AgentFactory.create_agent('confidence', {**agents_config, 'name': 'Production Confidence', 'agent_type': 'confidence'})
+    
+    agent_manager.register_agent('triage', triage_agent)
+    agent_manager.register_agent('research', research_agent)
+    agent_manager.register_agent('confidence', confidence_agent)
+    
+    # Initialize confidence agent knowledge base
+    from knowledge.knowledge_loader import KnowledgeLoader
+    knowledge_items = await KnowledgeLoader.load_sample_knowledge()
+    await confidence_agent.load_knowledge_base(knowledge_items)
+    
+    app.advanced_agent_manager = agent_manager
+    
+    # Connect to support processor
+    if hasattr(app, 'support_processor'):
+        app.support_processor.set_advanced_agent_manager(agent_manager)
+    
+    print("✅ Advanced agent system initialized")
+    return agent_manager
 
 def create_app():
     """Create and configure the AI Gatekeeper Flask application."""
@@ -45,6 +114,16 @@ def create_app():
     except Exception as e:
         print(f"⚠️  AI Gatekeeper initialization failed: {e}")
         # Continue with basic app even if AI Gatekeeper fails to initialize
+    
+    # Initialize confidence agent and advanced agent system
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        app.confidence_agent = loop.run_until_complete(initialize_confidence_agent(app))
+        app.advanced_agent_manager = loop.run_until_complete(initialize_advanced_agents(app))
+        loop.close()
+    except Exception as e:
+        print(f"⚠️ Advanced agent system initialization failed: {e}")
     
     @app.route('/')
     def index():
