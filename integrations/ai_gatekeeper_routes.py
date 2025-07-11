@@ -52,12 +52,17 @@ def register_ai_gatekeeper_routes(app):
         if hasattr(app, 'agent_manager'):
             support_processor.set_agent_manager(app.agent_manager)
         
+        # Connect to advanced agent manager (swarm intelligence)
+        if hasattr(app, 'advanced_agent_manager'):
+            support_processor.set_advanced_agent_manager(app.advanced_agent_manager)
+        
         if hasattr(app, 'search_system'):
             support_processor.set_search_system(app.search_system)
         
         # Initialize solution generator
         solution_generator = KnowledgeBaseSolutionGenerator(
             agent_manager=getattr(app, 'agent_manager', None),
+            advanced_agent_manager=getattr(app, 'advanced_agent_manager', None),
             search_system=getattr(app, 'search_system', None)
         )
         
@@ -474,19 +479,23 @@ def slack_integration():
 
 
 @ai_gatekeeper_bp.route('/feedback', methods=['POST'])
+@track_execution('feedback_submission')
 def submit_feedback():
     """
-    Submit feedback on AI Gatekeeper solutions.
+    Enhanced feedback submission with database persistence and confidence weight updates.
     
     Expected JSON payload:
     {
-        "request_id": "Request ID",
+        "request_id": "Request ID", 
         "solution_id": "Solution ID (optional)",
         "rating": 1-5,
         "feedback": "Text feedback",
-        "outcome": "resolved|not_resolved|partially_resolved"
+        "outcome": "resolved|not_resolved|partially_resolved",
+        "confidence_accuracy": 0.0-1.0 (optional),
+        "solution_helpful": true/false (optional)
     }
     """
+    start_time = time.time()
     try:
         if not request.is_json:
             return jsonify({'error': 'Request must be JSON'}), 400
@@ -499,6 +508,8 @@ def submit_feedback():
         rating = data.get('rating')
         feedback_text = data.get('feedback', '')
         outcome = data.get('outcome')
+        confidence_accuracy = data.get('confidence_accuracy')
+        solution_helpful = data.get('solution_helpful')
         
         if not request_id:
             return jsonify({'error': 'Request ID is required'}), 400
@@ -506,37 +517,172 @@ def submit_feedback():
         if rating is not None and (not isinstance(rating, int) or rating < 1 or rating > 5):
             return jsonify({'error': 'Rating must be an integer between 1 and 5'}), 400
         
-        # Store feedback (implement based on your feedback storage system)
-        feedback_data = {
-            'request_id': request_id,
-            'solution_id': solution_id,
-            'rating': rating,
-            'feedback': feedback_text,
-            'outcome': outcome,
-            'submitted_at': datetime.now().isoformat()
-        }
+        if confidence_accuracy is not None and (not isinstance(confidence_accuracy, (int, float)) or confidence_accuracy < 0 or confidence_accuracy > 1):
+            return jsonify({'error': 'Confidence accuracy must be between 0.0 and 1.0'}), 400
         
-        # Process feedback for learning (implement based on your learning system)
-        if solution_generator:
-            solution_generator.get_solution_feedback(solution_id or request_id, feedback_data)
+        # Process feedback with database persistence and learning
+        feedback_result = process_outcome_feedback(
+            request_id=request_id,
+            solution_id=solution_id,
+            rating=rating,
+            feedback_text=feedback_text,
+            outcome=outcome,
+            confidence_accuracy=confidence_accuracy,
+            solution_helpful=solution_helpful
+        )
+        
+        # Track metrics
+        duration = time.time() - start_time
+        performance_tracker.track_feedback(
+            outcome=outcome,
+            rating=rating,
+            confidence_accuracy=confidence_accuracy,
+            processing_time=duration
+        )
         
         response = {
-            'status': 'feedback_received',
-            'message': 'Thank you for your feedback',
-            'feedback_id': str(hash(f"{request_id}_{datetime.now().timestamp()}"))
+            'status': 'feedback_processed',
+            'message': 'Thank you for your feedback - system learning updated',
+            'feedback_id': feedback_result['feedback_id'],
+            'confidence_updates': feedback_result.get('confidence_updates', {}),
+            'learning_impact': feedback_result.get('learning_impact', 'moderate')
         }
         
         return jsonify(response), 200
         
     except Exception as e:
+        # Track error metrics
+        duration = time.time() - start_time
+        performance_tracker.track_request(
+            request_type="feedback",
+            success=False,
+            duration=duration
+        )
+        
         error_details = {
             'error': 'Feedback submission failed',
-            'details': str(e)
+            'details': str(e),
+            'type': type(e).__name__
         }
         
         current_app.logger.error(f"Feedback submission error: {traceback.format_exc()}")
         
         return jsonify(error_details), 500
+
+
+def process_outcome_feedback(request_id: str, solution_id: str = None, rating: int = None, 
+                           feedback_text: str = '', outcome: str = None, 
+                           confidence_accuracy: float = None, solution_helpful: bool = None) -> Dict[str, Any]:
+    """
+    Process feedback with database persistence and confidence weight updates.
+    
+    Args:
+        request_id: The support request ID
+        solution_id: Optional solution ID
+        rating: User rating (1-5)
+        feedback_text: Text feedback
+        outcome: Resolution outcome
+        confidence_accuracy: How accurate the AI confidence was
+        solution_helpful: Whether the solution was helpful
+    
+    Returns:
+        Dictionary with feedback processing results
+    """
+    from db import get_db_session
+    from db.crud import FeedbackCRUD, SupportTicketCRUD, SolutionCRUD, AgentPerformanceCRUD
+    
+    db_session = get_db_session()
+    
+    try:
+        # 1. Store feedback in database
+        issue_resolved = outcome == 'resolved'
+        
+        feedback_record = FeedbackCRUD.create_feedback(
+            db_session,
+            ticket_id=request_id,
+            user_satisfaction=rating,
+            solution_helpful=solution_helpful,
+            comments=feedback_text,
+            issue_resolved=issue_resolved
+        )
+        
+        # 2. Update solution effectiveness if solution_id provided
+        confidence_updates = {}
+        if solution_id:
+            solution_success = outcome == 'resolved'
+            updated_solution = SolutionCRUD.update_solution_effectiveness(
+                db_session, solution_id, solution_success
+            )
+            if updated_solution:
+                confidence_updates['solution_success_rate'] = updated_solution.success_rate
+                confidence_updates['solution_usage_count'] = updated_solution.usage_count
+        
+        # 3. Update agent performance metrics
+        ticket = SupportTicketCRUD.get_ticket(db_session, request_id)
+        if ticket:
+            # Update confidence agent performance
+            if confidence_accuracy is not None:
+                AgentPerformanceCRUD.update_performance(
+                    db_session,
+                    agent_type='confidence',
+                    success=outcome == 'resolved',
+                    response_time=1.0,  # Placeholder - would track actual response time
+                    confidence_accuracy=confidence_accuracy,
+                    user_satisfaction=rating / 5.0 if rating else None
+                )
+                confidence_updates['confidence_agent_accuracy'] = confidence_accuracy
+            
+            # Update triage agent performance
+            if ticket.triage_analysis:
+                triage_success = outcome == 'resolved'
+                AgentPerformanceCRUD.update_performance(
+                    db_session,
+                    agent_type='triage',
+                    success=triage_success,
+                    response_time=1.0,  # Placeholder
+                    user_satisfaction=rating / 5.0 if rating else None
+                )
+        
+        # 4. Update knowledge base effectiveness
+        if ticket and ticket.triage_analysis:
+            kb_items = ticket.triage_analysis.get('knowledge_base_items', [])
+            for kb_item in kb_items:
+                if isinstance(kb_item, dict) and 'id' in kb_item:
+                    from db.crud import KnowledgeBaseCRUD
+                    KnowledgeBaseCRUD.update_knowledge_effectiveness(
+                        db_session, kb_item['id'], outcome == 'resolved'
+                    )
+        
+        # 5. Calculate learning impact
+        learning_impact = 'low'
+        if confidence_accuracy is not None:
+            accuracy_delta = abs(confidence_accuracy - 0.5)  # How far from random
+            if accuracy_delta > 0.3:
+                learning_impact = 'high'
+            elif accuracy_delta > 0.15:
+                learning_impact = 'moderate'
+        
+        # Enhanced learning impact based on outcome
+        if outcome == 'resolved' and rating and rating >= 4:
+            learning_impact = 'high'
+        elif outcome == 'not_resolved' and rating and rating <= 2:
+            learning_impact = 'high'
+        
+        db_session.commit()
+        
+        return {
+            'feedback_id': str(feedback_record.id),
+            'confidence_updates': confidence_updates,
+            'learning_impact': learning_impact,
+            'metrics_updated': True
+        }
+        
+    except Exception as e:
+        db_session.rollback()
+        current_app.logger.error(f"Feedback processing error: {e}")
+        raise
+    finally:
+        db_session.close()
 
 
 def format_solution_for_slack(solution_data: Dict[str, Any], confidence_score: float) -> str:
@@ -588,33 +734,676 @@ def format_escalation_for_slack(support_request: SupportRequest) -> str:
 
 @ai_gatekeeper_bp.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint for AI Gatekeeper system."""
+    """Enhanced health check endpoint for AI Gatekeeper system."""
     try:
-        health_status = {
-            'status': 'healthy',
-            'timestamp': datetime.now().isoformat(),
-            'components': {
-                'support_processor': support_processor is not None,
-                'solution_generator': solution_generator is not None,
-                'agent_manager': support_processor.agent_manager is not None if support_processor else False,
-                'search_system': support_processor.search_system is not None if support_processor else False
-            }
-        }
+        # Perform comprehensive health checks
+        health_results = perform_comprehensive_health_check()
         
-        # Check if all components are healthy
-        all_healthy = all(health_status['components'].values())
+        # Determine overall status
+        component_statuses = list(health_results['components'].values())
+        critical_components = ['database', 'vector_store', 'support_processor']
         
-        if not all_healthy:
-            health_status['status'] = 'degraded'
-            return jsonify(health_status), 503
+        # Check critical components
+        critical_healthy = all(
+            health_results['components'].get(comp, {}).get('healthy', False) 
+            for comp in critical_components
+        )
         
-        return jsonify(health_status), 200
+        # Determine overall health
+        if critical_healthy:
+            if all(comp.get('healthy', False) for comp in component_statuses):
+                overall_status = 'healthy'
+                status_code = 200
+            else:
+                overall_status = 'degraded'
+                status_code = 200  # Degraded but operational
+        else:
+            overall_status = 'unhealthy'
+            status_code = 503
+        
+        health_results['status'] = overall_status
+        health_results['timestamp'] = datetime.now().isoformat()
+        
+        return jsonify(health_results), status_code
         
     except Exception as e:
         health_status = {
             'status': 'unhealthy',
             'timestamp': datetime.now().isoformat(),
-            'error': str(e)
+            'error': str(e),
+            'error_type': type(e).__name__
         }
         
+        current_app.logger.error(f"Health check failed: {traceback.format_exc()}")
         return jsonify(health_status), 503
+
+
+def perform_comprehensive_health_check() -> Dict[str, Any]:
+    """Perform comprehensive health checks for all system components."""
+    health_results = {
+        'components': {},
+        'summary': {
+            'total_components': 0,
+            'healthy_components': 0,
+            'degraded_components': 0,
+            'unhealthy_components': 0
+        }
+    }
+    
+    # Check database
+    health_results['components']['database'] = check_database_health()
+    
+    # Check vector store
+    health_results['components']['vector_store'] = check_vector_store_health()
+    
+    # Check support processor
+    health_results['components']['support_processor'] = check_support_processor_health()
+    
+    # Check solution generator
+    health_results['components']['solution_generator'] = check_solution_generator_health()
+    
+    # Check agent managers
+    health_results['components']['agent_manager'] = check_agent_manager_health()
+    health_results['components']['advanced_agent_manager'] = check_advanced_agent_manager_health()
+    
+    # Check OpenAI API
+    health_results['components']['openai_api'] = check_openai_api_health()
+    
+    # Check Slack integration
+    health_results['components']['slack_integration'] = check_slack_integration_health()
+    
+    # Calculate summary statistics
+    component_checks = health_results['components']
+    health_results['summary']['total_components'] = len(component_checks)
+    
+    for component_name, component_health in component_checks.items():
+        if component_health.get('healthy', False):
+            health_results['summary']['healthy_components'] += 1
+        elif component_health.get('status') == 'degraded':
+            health_results['summary']['degraded_components'] += 1
+        else:
+            health_results['summary']['unhealthy_components'] += 1
+    
+    return health_results
+
+
+def check_database_health() -> Dict[str, Any]:
+    """Check database connectivity and health."""
+    try:
+        from db.database import db_manager
+        
+        start_time = time.time()
+        is_healthy = db_manager.health_check()
+        response_time = time.time() - start_time
+        
+        if is_healthy:
+            return {
+                'healthy': True,
+                'status': 'healthy',
+                'response_time_ms': round(response_time * 1000, 2),
+                'message': 'Database connection successful'
+            }
+        else:
+            return {
+                'healthy': False,
+                'status': 'unhealthy',
+                'response_time_ms': round(response_time * 1000, 2),
+                'error': 'Database connection failed'
+            }
+    except Exception as e:
+        return {
+            'healthy': False,
+            'status': 'unhealthy',
+            'error': str(e),
+            'error_type': type(e).__name__
+        }
+
+
+def check_vector_store_health() -> Dict[str, Any]:
+    """Check vector store connectivity and health."""
+    try:
+        from db.vector_store import get_vector_store
+        
+        start_time = time.time()
+        vector_store = get_vector_store()
+        
+        if vector_store:
+            is_healthy = vector_store.health_check()
+            response_time = time.time() - start_time
+            
+            if is_healthy:
+                return {
+                    'healthy': True,
+                    'status': 'healthy',
+                    'response_time_ms': round(response_time * 1000, 2),
+                    'message': 'Vector store connection successful'
+                }
+            else:
+                return {
+                    'healthy': False,
+                    'status': 'unhealthy',
+                    'response_time_ms': round(response_time * 1000, 2),
+                    'error': 'Vector store connection failed'
+                }
+        else:
+            return {
+                'healthy': False,
+                'status': 'unhealthy',
+                'error': 'Vector store not initialized'
+            }
+    except Exception as e:
+        return {
+            'healthy': False,
+            'status': 'unhealthy',
+            'error': str(e),
+            'error_type': type(e).__name__
+        }
+
+
+def check_support_processor_health() -> Dict[str, Any]:
+    """Check support processor health."""
+    try:
+        if support_processor:
+            return {
+                'healthy': True,
+                'status': 'healthy',
+                'message': 'Support processor initialized',
+                'active_requests': len(support_processor.active_requests),
+                'confidence_threshold': support_processor.confidence_threshold,
+                'risk_threshold': support_processor.risk_threshold
+            }
+        else:
+            return {
+                'healthy': False,
+                'status': 'unhealthy',
+                'error': 'Support processor not initialized'
+            }
+    except Exception as e:
+        return {
+            'healthy': False,
+            'status': 'unhealthy',
+            'error': str(e),
+            'error_type': type(e).__name__
+        }
+
+
+def check_solution_generator_health() -> Dict[str, Any]:
+    """Check solution generator health."""
+    try:
+        if solution_generator:
+            return {
+                'healthy': True,
+                'status': 'healthy',
+                'message': 'Solution generator initialized'
+            }
+        else:
+            return {
+                'healthy': False,
+                'status': 'degraded',
+                'error': 'Solution generator not initialized'
+            }
+    except Exception as e:
+        return {
+            'healthy': False,
+            'status': 'unhealthy',
+            'error': str(e),
+            'error_type': type(e).__name__
+        }
+
+
+def check_agent_manager_health() -> Dict[str, Any]:
+    """Check agent manager health."""
+    try:
+        if support_processor and support_processor.agent_manager:
+            return {
+                'healthy': True,
+                'status': 'healthy',
+                'message': 'Agent manager initialized'
+            }
+        else:
+            return {
+                'healthy': False,
+                'status': 'degraded',
+                'error': 'Agent manager not initialized'
+            }
+    except Exception as e:
+        return {
+            'healthy': False,
+            'status': 'unhealthy',
+            'error': str(e),
+            'error_type': type(e).__name__
+        }
+
+
+def check_advanced_agent_manager_health() -> Dict[str, Any]:
+    """Check advanced agent manager health."""
+    try:
+        if support_processor and support_processor.advanced_agent_manager:
+            return {
+                'healthy': True,
+                'status': 'healthy',
+                'message': 'Advanced agent manager initialized'
+            }
+        else:
+            return {
+                'healthy': False,
+                'status': 'degraded',
+                'error': 'Advanced agent manager not initialized'
+            }
+    except Exception as e:
+        return {
+            'healthy': False,
+            'status': 'unhealthy',
+            'error': str(e),
+            'error_type': type(e).__name__
+        }
+
+
+def check_openai_api_health() -> Dict[str, Any]:
+    """Check OpenAI API connectivity."""
+    try:
+        import openai
+        import os
+        
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            return {
+                'healthy': False,
+                'status': 'unhealthy',
+                'error': 'OpenAI API key not configured'
+            }
+        
+        # Simple API test - try to list models
+        start_time = time.time()
+        try:
+            client = openai.OpenAI(api_key=api_key)
+            models = client.models.list()
+            response_time = time.time() - start_time
+            
+            return {
+                'healthy': True,
+                'status': 'healthy',
+                'response_time_ms': round(response_time * 1000, 2),
+                'message': 'OpenAI API connection successful',
+                'models_available': len(models.data) if models else 0
+            }
+        except Exception as api_error:
+            response_time = time.time() - start_time
+            return {
+                'healthy': False,
+                'status': 'unhealthy',
+                'response_time_ms': round(response_time * 1000, 2),
+                'error': str(api_error),
+                'error_type': type(api_error).__name__
+            }
+    except Exception as e:
+        return {
+            'healthy': False,
+            'status': 'unhealthy',
+            'error': str(e),
+            'error_type': type(e).__name__
+        }
+
+
+def check_slack_integration_health() -> Dict[str, Any]:
+    """Check Slack integration health."""
+    try:
+        import os
+        
+        slack_token = os.getenv('SLACK_BOT_TOKEN')
+        if not slack_token:
+            return {
+                'healthy': False,
+                'status': 'degraded',
+                'error': 'Slack bot token not configured',
+                'message': 'Slack integration disabled'
+            }
+        
+        # Simple validation - check token format
+        if slack_token.startswith('xoxb-'):
+            return {
+                'healthy': True,
+                'status': 'healthy',
+                'message': 'Slack bot token configured',
+                'note': 'Token validation requires network call'
+            }
+        else:
+            return {
+                'healthy': False,
+                'status': 'degraded',
+                'error': 'Invalid Slack bot token format',
+                'message': 'Expected format: xoxb-...'
+            }
+    except Exception as e:
+        return {
+            'healthy': False,
+            'status': 'unhealthy',
+            'error': str(e),
+            'error_type': type(e).__name__
+        }
+
+
+@ai_gatekeeper_bp.route('/handoff', methods=['POST'])
+@track_execution('human_handoff')
+def handoff_to_human():
+    """
+    Handoff support ticket to human expert with comprehensive context.
+    
+    Expected JSON payload:
+    {
+        "ticket_id": "UUID of the support ticket",
+        "handoff_reason": "Reason for human handoff",
+        "priority": "low|medium|high|critical",
+        "human_assignee": "Optional: specific human to assign to",
+        "context_notes": "Additional context for human expert",
+        "escalation_type": "technical|customer_service|specialist"
+    }
+    """
+    start_time = time.time()
+    try:
+        if not request.is_json:
+            return jsonify({'error': 'Request must be JSON'}), 400
+        
+        data = request.get_json()
+        
+        # Extract required fields
+        ticket_id = data.get('ticket_id')
+        handoff_reason = data.get('handoff_reason', 'Manual handoff requested')
+        priority = data.get('priority', 'medium')
+        human_assignee = data.get('human_assignee')
+        context_notes = data.get('context_notes', '')
+        escalation_type = data.get('escalation_type', 'technical')
+        
+        if not ticket_id:
+            return jsonify({'error': 'ticket_id is required'}), 400
+        
+        # Validate priority
+        valid_priorities = ['low', 'medium', 'high', 'critical']
+        if priority not in valid_priorities:
+            return jsonify({'error': f'priority must be one of: {valid_priorities}'}), 400
+        
+        # Validate escalation type
+        valid_escalation_types = ['technical', 'customer_service', 'specialist', 'billing', 'security']
+        if escalation_type not in valid_escalation_types:
+            return jsonify({'error': f'escalation_type must be one of: {valid_escalation_types}'}), 400
+        
+        # Process handoff with comprehensive context
+        handoff_result = process_human_handoff(
+            ticket_id=ticket_id,
+            handoff_reason=handoff_reason,
+            priority=priority,
+            human_assignee=human_assignee,
+            context_notes=context_notes,
+            escalation_type=escalation_type
+        )
+        
+        # Track metrics
+        duration = time.time() - start_time
+        performance_tracker.track_escalation(f"{escalation_type}_handoff")
+        performance_tracker.track_request(
+            request_type="handoff",
+            success=True,
+            duration=duration
+        )
+        
+        response = {
+            'status': 'handoff_successful',
+            'message': 'Ticket successfully handed off to human expert',
+            'handoff_id': handoff_result['handoff_id'],
+            'ticket_id': ticket_id,
+            'assigned_to': handoff_result.get('assigned_to', 'Unassigned'),
+            'escalation_type': escalation_type,
+            'priority': priority,
+            'estimated_response_time': handoff_result.get('estimated_response_time', 'Within 2 hours'),
+            'context_summary': handoff_result.get('context_summary', {}),
+            'handoff_timestamp': handoff_result.get('handoff_timestamp')
+        }
+        
+        return jsonify(response), 200
+        
+    except ValueError as e:
+        # Handle validation errors
+        error_details = {
+            'error': 'Invalid request data',
+            'details': str(e)
+        }
+        return jsonify(error_details), 400
+        
+    except Exception as e:
+        # Track error metrics
+        duration = time.time() - start_time
+        performance_tracker.track_request(
+            request_type="handoff",
+            success=False,
+            duration=duration
+        )
+        
+        error_details = {
+            'error': 'Human handoff failed',
+            'details': str(e),
+            'type': type(e).__name__
+        }
+        
+        current_app.logger.error(f"Human handoff error: {traceback.format_exc()}")
+        
+        return jsonify(error_details), 500
+
+
+@ai_gatekeeper_bp.route('/handoff/<ticket_id>/status', methods=['GET'])
+def get_handoff_status(ticket_id: str):
+    """
+    Get the current status of a human handoff.
+    
+    Args:
+        ticket_id: The ID of the support ticket
+    """
+    try:
+        handoff_status = get_ticket_handoff_status(ticket_id)
+        
+        if not handoff_status:
+            return jsonify({'error': 'Ticket not found or not handed off'}), 404
+        
+        return jsonify(handoff_status), 200
+        
+    except Exception as e:
+        error_details = {
+            'error': 'Failed to retrieve handoff status',
+            'details': str(e)
+        }
+        
+        current_app.logger.error(f"Handoff status retrieval error: {traceback.format_exc()}")
+        
+        return jsonify(error_details), 500
+
+
+def process_human_handoff(ticket_id: str, handoff_reason: str, priority: str = 'medium',
+                         human_assignee: str = None, context_notes: str = '', 
+                         escalation_type: str = 'technical') -> Dict[str, Any]:
+    """
+    Process human handoff with comprehensive context and database updates.
+    
+    Args:
+        ticket_id: The support ticket ID
+        handoff_reason: Reason for handoff
+        priority: Priority level
+        human_assignee: Optional specific human assignee
+        context_notes: Additional context notes
+        escalation_type: Type of escalation
+    
+    Returns:
+        Dictionary with handoff processing results
+    """
+    from db import get_db_session
+    from db.crud import SupportTicketCRUD
+    
+    db_session = get_db_session()
+    
+    try:
+        # Get the ticket
+        ticket = SupportTicketCRUD.get_ticket(db_session, ticket_id)
+        if not ticket:
+            raise ValueError(f"Ticket {ticket_id} not found")
+        
+        # Check if ticket is already closed
+        if ticket.status == SupportRequestStatus.CLOSED.value:
+            raise ValueError(f"Ticket {ticket_id} is already closed")
+        
+        # Generate comprehensive context for human expert
+        context_summary = generate_handoff_context(ticket, context_notes, escalation_type)
+        
+        # Update ticket with handoff information
+        enhanced_reason = f"[{escalation_type.upper()}] {handoff_reason}"
+        if context_notes:
+            enhanced_reason += f" | Notes: {context_notes}"
+        
+        escalated_ticket = SupportTicketCRUD.escalate_ticket(
+            db_session,
+            ticket_id=ticket_id,
+            escalation_reason=enhanced_reason,
+            human_assignee=human_assignee
+        )
+        
+        # Update priority if provided
+        if priority != 'medium':
+            escalated_ticket.priority = priority
+            db_session.commit()
+        
+        # Estimate response time based on priority and escalation type
+        response_time = estimate_response_time(priority, escalation_type)
+        
+        # Create handoff record
+        handoff_timestamp = datetime.now().isoformat()
+        handoff_id = f"handoff_{ticket_id}_{int(datetime.now().timestamp())}"
+        
+        return {
+            'handoff_id': handoff_id,
+            'assigned_to': human_assignee or 'Support Team',
+            'estimated_response_time': response_time,
+            'context_summary': context_summary,
+            'handoff_timestamp': handoff_timestamp,
+            'escalation_type': escalation_type,
+            'priority': priority
+        }
+        
+    except Exception as e:
+        db_session.rollback()
+        current_app.logger.error(f"Handoff processing error: {e}")
+        raise
+    finally:
+        db_session.close()
+
+
+def generate_handoff_context(ticket: 'SupportTicket', context_notes: str, escalation_type: str) -> Dict[str, Any]:
+    """Generate comprehensive context for human expert."""
+    context = {
+        'ticket_summary': {
+            'id': str(ticket.id),
+            'message': ticket.message,
+            'priority': ticket.priority,
+            'status': ticket.status,
+            'created_at': ticket.created_at.isoformat(),
+            'user_context': ticket.user_context
+        },
+        'ai_analysis': {
+            'confidence_score': ticket.confidence_score,
+            'risk_score': ticket.risk_score,
+            'triage_analysis': ticket.triage_analysis
+        },
+        'escalation_context': {
+            'escalation_type': escalation_type,
+            'context_notes': context_notes,
+            'escalation_reason': ticket.escalation_reason
+        },
+        'solution_attempts': [],
+        'feedback_history': []
+    }
+    
+    # Add solution information if available
+    if ticket.solution:
+        context['solution_attempts'].append({
+            'title': ticket.solution.title,
+            'content': ticket.solution.content[:200] + '...' if len(ticket.solution.content) > 200 else ticket.solution.content,
+            'success_rate': ticket.solution.success_rate,
+            'solution_type': ticket.solution.solution_type
+        })
+    
+    # Add feedback if available
+    if ticket.feedback:
+        context['feedback_history'] = [
+            {
+                'rating': fb.user_satisfaction,
+                'helpful': fb.solution_helpful,
+                'comments': fb.comments,
+                'created_at': fb.created_at.isoformat()
+            }
+            for fb in ticket.feedback[-3:]  # Last 3 feedback entries
+        ]
+    
+    return context
+
+
+def estimate_response_time(priority: str, escalation_type: str) -> str:
+    """Estimate response time based on priority and escalation type."""
+    base_times = {
+        'critical': 30,    # 30 minutes
+        'high': 120,       # 2 hours
+        'medium': 480,     # 8 hours
+        'low': 1440        # 24 hours
+    }
+    
+    multipliers = {
+        'security': 0.5,        # Security issues are urgent
+        'billing': 1.0,         # Standard response
+        'technical': 1.0,       # Standard response
+        'customer_service': 1.2, # Slightly longer for complex service issues
+        'specialist': 1.5       # Longer for specialist consultation
+    }
+    
+    base_minutes = base_times.get(priority, 480)
+    multiplier = multipliers.get(escalation_type, 1.0)
+    estimated_minutes = int(base_minutes * multiplier)
+    
+    if estimated_minutes < 60:
+        return f"{estimated_minutes} minutes"
+    elif estimated_minutes < 1440:
+        hours = estimated_minutes // 60
+        return f"{hours} hour{'s' if hours > 1 else ''}"
+    else:
+        days = estimated_minutes // 1440
+        return f"{days} day{'s' if days > 1 else ''}"
+
+
+def get_ticket_handoff_status(ticket_id: str) -> Optional[Dict[str, Any]]:
+    """Get handoff status for a ticket."""
+    from db import get_db_session
+    from db.crud import SupportTicketCRUD
+    
+    db_session = get_db_session()
+    
+    try:
+        ticket = SupportTicketCRUD.get_ticket(db_session, ticket_id)
+        if not ticket:
+            return None
+        
+        if ticket.status != SupportRequestStatus.ESCALATED.value:
+            return {
+                'ticket_id': ticket_id,
+                'status': 'not_escalated',
+                'message': 'Ticket has not been escalated to human expert'
+            }
+        
+        return {
+            'ticket_id': ticket_id,
+            'status': 'escalated',
+            'escalated_at': ticket.escalated_at.isoformat() if ticket.escalated_at else None,
+            'escalation_reason': ticket.escalation_reason,
+            'human_assignee': ticket.human_assignee,
+            'priority': ticket.priority,
+            'last_updated': ticket.updated_at.isoformat()
+        }
+        
+    except Exception as e:
+        current_app.logger.error(f"Handoff status retrieval error: {e}")
+        return None
+    finally:
+        db_session.close()

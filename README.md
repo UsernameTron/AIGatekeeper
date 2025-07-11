@@ -149,11 +149,119 @@ Add to your environment variables:
 ```bash
 # Optional: Slack integration
 export SLACK_BOT_TOKEN="xoxb-your-slack-bot-token"
+export SLACK_APP_TOKEN="xapp-your-slack-app-token"  # For Socket Mode
+export SLACK_SIGNING_SECRET="your-slack-signing-secret"
+export SLACK_SUPPORT_CHANNELS="support,help,it-support"
 
-# Optional: AI Gatekeeper thresholds
+# Optional: AI Gatekeeper thresholds (both formats supported)
+export CONFIDENCE_THRESHOLD=0.8
+export RISK_THRESHOLD=0.3
+# OR
 export SUPPORT_CONFIDENCE_THRESHOLD=0.8
 export SUPPORT_RISK_THRESHOLD=0.3
+
+# Optional: AI Gatekeeper advanced settings
+export ENABLE_SWARM_INTELLIGENCE=true
+export MAX_ESCALATION_TIME=1800
+export ENABLE_LEARNING_UPDATES=true
+export FEEDBACK_REQUIRED_FOR_LEARNING=true
+
+# Optional: Authentication settings
+export JWT_SECRET_KEY="your-jwt-secret-key"
+export ADMIN_API_KEY="your-admin-api-key"
+export DEFAULT_API_KEY="your-default-api-key"
+# Format: API_KEY_<NAME>=<key>:<role>
+export API_KEY_ADMIN="admin-key-123:admin"
+export API_KEY_USER="user-key-456:api_user"
 ```
+
+## 🔐 Authentication
+
+The AI Gatekeeper API uses JWT tokens and Bearer tokens for authentication.
+
+### Generate Authentication Token
+
+```bash
+curl -X POST http://localhost:5000/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "your-user-id",
+    "email": "your-email@example.com",
+    "role": "api_user",
+    "admin_key": "your-admin-api-key"
+  }'
+```
+
+### Using Authentication
+
+Include the token in the Authorization header:
+
+```bash
+curl -H "Authorization: Bearer <your-token>" \
+  http://localhost:5000/api/support/evaluate
+```
+
+### Roles and Permissions
+
+- **admin**: Full access (read, write, delete, manage)
+- **operator**: Read and write access
+- **viewer**: Read-only access  
+- **api_user**: Read and write access for API operations
+
+## 🧪 Testing
+
+The AI Gatekeeper system includes comprehensive unit and integration tests.
+
+### Running Tests
+
+```bash
+# Install test dependencies
+pip install -r requirements-test.txt
+
+# Run all tests
+python test_runner.py
+
+# Run specific test types
+python test_runner.py --type unit
+python test_runner.py --type integration
+
+# Run with coverage
+python test_runner.py --coverage
+
+# Run specific test file
+python test_runner.py --test tests/test_database.py
+
+# Verbose output
+python test_runner.py --verbose
+```
+
+### Test Structure
+
+- **Unit Tests**: Test individual components in isolation
+  - `test_database.py` - Database models and CRUD operations
+  - `test_auth_middleware.py` - Authentication and authorization
+  - `test_confidence_agent.py` - Confidence scoring logic
+
+- **Integration Tests**: Test component interactions
+  - `test_api_integration.py` - API endpoint testing
+  - `test_advanced_agents_integration.py` - Agent system integration
+
+### Test Coverage
+
+Run tests with coverage to ensure code quality:
+
+```bash
+python test_runner.py --coverage
+# View coverage report: htmlcov/index.html
+```
+
+### Test Environment
+
+Tests run in isolated environment with:
+- In-memory SQLite database
+- Mock OpenAI API calls
+- Test authentication tokens
+- Isolated configuration
 
 ## 📡 API Endpoints
 

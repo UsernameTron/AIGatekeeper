@@ -72,6 +72,17 @@ class AnalyticsConfig:
 
 
 @dataclass
+class SupportConfig:
+    """Configuration for AI Gatekeeper support system."""
+    confidence_threshold: float = 0.8
+    risk_threshold: float = 0.3
+    enable_swarm_intelligence: bool = True
+    max_escalation_time: int = 1800  # 30 minutes in seconds
+    enable_learning_updates: bool = True
+    feedback_required_for_learning: bool = True
+
+
+@dataclass
 class SharedConfig:
     """Centralized configuration for the shared agent framework."""
     
@@ -86,6 +97,7 @@ class SharedConfig:
     agent_config: AgentConfig = field(default_factory=AgentConfig)
     rag_config: RAGConfig = field(default_factory=RAGConfig)
     analytics_config: AnalyticsConfig = field(default_factory=AnalyticsConfig)
+    support_config: SupportConfig = field(default_factory=SupportConfig)
     
     # System settings
     log_level: str = "INFO"
@@ -100,6 +112,7 @@ class SharedConfig:
         """Initialize default models if none provided."""
         if not self.models:
             self._setup_default_models()
+        self._load_environment_variables()
     
     def _setup_default_models(self):
         """Setup default model configurations."""
@@ -137,6 +150,49 @@ class SharedConfig:
             ),
         })
     
+    def _load_environment_variables(self):
+        """Load configuration from environment variables."""
+        # Support configuration
+        if hasattr(self, 'support_config') and self.support_config:
+            self.support_config.confidence_threshold = float(os.getenv(
+                'CONFIDENCE_THRESHOLD', 
+                os.getenv('SUPPORT_CONFIDENCE_THRESHOLD', str(self.support_config.confidence_threshold))
+            ))
+            self.support_config.risk_threshold = float(os.getenv(
+                'RISK_THRESHOLD', 
+                os.getenv('SUPPORT_RISK_THRESHOLD', str(self.support_config.risk_threshold))
+            ))
+            self.support_config.enable_swarm_intelligence = os.getenv(
+                'ENABLE_SWARM_INTELLIGENCE', 'true'
+            ).lower() == 'true'
+            self.support_config.max_escalation_time = int(os.getenv(
+                'MAX_ESCALATION_TIME', str(self.support_config.max_escalation_time)
+            ))
+            self.support_config.enable_learning_updates = os.getenv(
+                'ENABLE_LEARNING_UPDATES', 'true'
+            ).lower() == 'true'
+            self.support_config.feedback_required_for_learning = os.getenv(
+                'FEEDBACK_REQUIRED_FOR_LEARNING', 'true'
+            ).lower() == 'true'
+        
+        # Environment
+        env_name = os.getenv('ENVIRONMENT', 'development').lower()
+        if env_name in ['development', 'dev']:
+            self.environment = ConfigEnvironment.DEVELOPMENT
+        elif env_name in ['testing', 'test']:
+            self.environment = ConfigEnvironment.TESTING
+        elif env_name in ['production', 'prod']:
+            self.environment = ConfigEnvironment.PRODUCTION
+        
+        # Debug mode
+        self.debug = os.getenv('DEBUG', 'true' if self.environment == ConfigEnvironment.DEVELOPMENT else 'false').lower() == 'true'
+        
+        # Log level
+        self.log_level = os.getenv('LOG_LEVEL', self.log_level)
+        
+        # Telemetry
+        self.enable_telemetry = os.getenv('ENABLE_TELEMETRY', 'false').lower() == 'true'
+    
     def get_model_config(self, model_name: str) -> Optional[ModelConfig]:
         """Get configuration for a specific model."""
         return self.models.get(model_name)
@@ -168,6 +224,16 @@ class SharedConfig:
         
         if self.rag_config.similarity_threshold < 0 or self.rag_config.similarity_threshold > 1:
             errors.append("RAG similarity_threshold must be between 0 and 1")
+        
+        # Validate support config
+        if self.support_config.confidence_threshold < 0 or self.support_config.confidence_threshold > 1:
+            errors.append("Support confidence_threshold must be between 0 and 1")
+        
+        if self.support_config.risk_threshold < 0 or self.support_config.risk_threshold > 1:
+            errors.append("Support risk_threshold must be between 0 and 1")
+        
+        if self.support_config.max_escalation_time <= 0:
+            errors.append("Support max_escalation_time must be positive")
         
         return errors
     
@@ -209,6 +275,14 @@ class SharedConfig:
                 'reporting_interval': self.analytics_config.reporting_interval,
                 'metrics_retention_days': self.analytics_config.metrics_retention_days,
                 'enable_performance_monitoring': self.analytics_config.enable_performance_monitoring
+            },
+            'support_config': {
+                'confidence_threshold': self.support_config.confidence_threshold,
+                'risk_threshold': self.support_config.risk_threshold,
+                'enable_swarm_intelligence': self.support_config.enable_swarm_intelligence,
+                'max_escalation_time': self.support_config.max_escalation_time,
+                'enable_learning_updates': self.support_config.enable_learning_updates,
+                'feedback_required_for_learning': self.support_config.feedback_required_for_learning
             },
             'log_level': self.log_level,
             'enable_telemetry': self.enable_telemetry,

@@ -8,6 +8,7 @@ import os
 import json
 import asyncio
 import uuid
+import logging
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -20,6 +21,9 @@ from shared_agents.core.agent_factory import AgentBase, AgentResponse, AgentCapa
 from shared_agents.config.shared_config import SharedConfig
 from core.confidence_agent import ConfidenceAgent, ConfidenceResult
 from core.advanced_agent_manager import AdvancedAgentManager
+from db import get_db_session, SupportTicket, SupportRequestStatus
+from db.crud import SupportTicketCRUD, SwarmExecutionCRUD
+from sqlalchemy.orm import Session
 
 
 class SupportRequestPriority(Enum):
@@ -69,9 +73,12 @@ class SupportRequestProcessor:
         self.active_requests: Dict[str, SupportRequest] = {}
         self.processing_queue: List[str] = []
         
-        # Configuration for AI Gatekeeper
-        self.confidence_threshold = getattr(config, 'support_confidence_threshold', 0.8)
-        self.risk_threshold = getattr(config, 'support_risk_threshold', 0.3)
+        # Configuration for AI Gatekeeper (load from config with env var support)
+        self.confidence_threshold = config.support_config.confidence_threshold
+        self.risk_threshold = config.support_config.risk_threshold
+        self.enable_swarm_intelligence = config.support_config.enable_swarm_intelligence
+        self.max_escalation_time = config.support_config.max_escalation_time
+        self.enable_learning_updates = config.support_config.enable_learning_updates
         
         # Initialize agent connections (will be injected from existing system)
         self.agent_manager = None
@@ -95,59 +102,98 @@ class SupportRequestProcessor:
         """Set the advanced agent manager with swarm intelligence."""
         self.advanced_agent_manager = advanced_agent_manager
     
-    async def process_support_request(self, message: str, user_context: Dict[str, Any]) -> SupportRequest:
+    async def process_support_request(self, message: str, user_context: Dict[str, Any]) -> SupportTicket:
         """
-        Process an incoming support request using existing agent framework.
+        Process an incoming support request using advanced agent framework and database persistence.
         
         Args:
             message: The support request message
             user_context: Context about the user and environment
             
         Returns:
-            SupportRequest with processing results
+            SupportTicket with processing results
         """
-        # Create new support request
-        request = SupportRequest(
-            message=message,
-            user_context=user_context,
-            priority=self._determine_priority(message, user_context),
-            metadata={
-                'source': 'ai_gatekeeper',
-                'processing_started': datetime.now().isoformat()
-            }
-        )
-        
-        # Store request
-        self.active_requests[request.id] = request
-        self.processing_queue.append(request.id)
+        db_session = get_db_session()
         
         try:
-            # Step 1: Use TriageAgent for initial evaluation
-            triage_result = await self._perform_triage_evaluation(request)
+            # Create new support ticket in database
+            ticket = SupportTicketCRUD.create_ticket(
+                db_session,
+                message=message,
+                user_context=user_context,
+                priority=self._determine_priority(message, user_context)
+            )
             
-            # Step 2: Calculate confidence and risk scores
-            request.confidence_score = triage_result.get('confidence_score', 0.0)
-            request.risk_score = triage_result.get('risk_score', 0.5)
-            
-            # Step 3: Determine resolution path
-            resolution_path = self._determine_resolution_path(request)
-            request.resolution_path = resolution_path
-            
-            # Step 4: Execute resolution path
-            if resolution_path == "automated_resolution":
-                await self._handle_automated_resolution(request)
-            else:
-                await self._handle_escalation(request)
+            # Use advanced agent manager with swarm intelligence
+            if self.advanced_agent_manager:
+                # Step 1: Execute swarm task for comprehensive analysis
+                swarm_result = await self.advanced_agent_manager.execute_swarm_task(
+                    {
+                        'query': message,
+                        'context': user_context,
+                        'ticket_id': str(ticket.id)
+                    },
+                    ['triage', 'confidence', 'research']
+                )
                 
-            request.status = SupportRequestStatus.RESOLVED
-            request.updated_at = datetime.now()
+                # Store swarm execution results
+                SwarmExecutionCRUD.create_swarm_execution(
+                    db_session,
+                    ticket_id=str(ticket.id),
+                    participating_agents=['triage', 'confidence', 'research'],
+                    individual_results=swarm_result.get('individual_results', {}),
+                    consensus_reached=swarm_result.get('consensus', {}).get('consensus_strength', 0) > 0.75,
+                    consensus_confidence=swarm_result.get('confidence', 0.0)
+                )
+                
+                # Extract confidence and risk scores from swarm consensus
+                confidence_score = swarm_result.get('confidence', 0.0)
+                risk_score = self._calculate_risk_from_swarm_result(swarm_result)
+                
+                # Update ticket with analysis results
+                ticket = SupportTicketCRUD.update_ticket_status(
+                    db_session,
+                    ticket_id=str(ticket.id),
+                    status=SupportRequestStatus.AI_AUTO.value,
+                    confidence_score=confidence_score,
+                    risk_score=risk_score,
+                    triage_analysis=swarm_result
+                )
+                
+            else:
+                # Fallback to original processing
+                triage_result = await self._perform_triage_evaluation_fallback(message, user_context)
+                ticket = SupportTicketCRUD.update_ticket_status(
+                    db_session,
+                    ticket_id=str(ticket.id),
+                    status=SupportRequestStatus.AI_AUTO.value,
+                    confidence_score=triage_result.get('confidence_score', 0.0),
+                    risk_score=triage_result.get('risk_score', 0.5),
+                    triage_analysis=triage_result
+                )
             
+            # Step 2: Determine resolution path
+            resolution_path = self._determine_resolution_path_from_ticket(ticket)
+            
+            # Step 3: Execute resolution path
+            if resolution_path == "automated_resolution":
+                await self._handle_automated_resolution_with_db(ticket, db_session)
+            else:
+                await self._handle_escalation_with_db(ticket, db_session)
+                
         except Exception as e:
-            request.status = SupportRequestStatus.ESCALATED
-            request.metadata['error'] = str(e)
-            request.updated_at = datetime.now()
+            logging.error(f"Support request processing failed: {e}")
+            # Update ticket status to escalated on error
+            if 'ticket' in locals():
+                SupportTicketCRUD.escalate_ticket(
+                    db_session,
+                    ticket_id=str(ticket.id),
+                    escalation_reason=f"Processing error: {str(e)}"
+                )
+        finally:
+            db_session.close()
             
-        return request
+        return ticket
     
     async def _perform_triage_evaluation(self, request: SupportRequest) -> Dict[str, Any]:
         """Use confidence agent for evaluation."""
@@ -452,6 +498,199 @@ class SupportRequestProcessor:
         
         if risk > self.risk_threshold:
             return f"High risk score ({risk:.2f}) - requires human oversight"
+        
+        return "Complex issue requiring human intervention"
+    
+    def _calculate_risk_from_swarm_result(self, swarm_result: Dict[str, Any]) -> float:
+        """Calculate risk score from swarm intelligence consensus"""
+        base_risk = 0.3
+        
+        # Extract individual agent risk assessments
+        individual_results = swarm_result.get('individual_results', {})
+        
+        # Combine risk signals from different agents
+        triage_risk = individual_results.get('triage', {}).get('risk_score', 0.5)
+        confidence_risk = 1.0 - individual_results.get('confidence', {}).get('confidence_score', 0.5)
+        research_risk = individual_results.get('research', {}).get('complexity_score', 0.5)
+        
+        # Calculate weighted average
+        combined_risk = (triage_risk * 0.4 + confidence_risk * 0.4 + research_risk * 0.2)
+        
+        # Adjust based on consensus strength
+        consensus_strength = swarm_result.get('consensus', {}).get('consensus_strength', 0.5)
+        if consensus_strength < 0.6:
+            combined_risk += 0.2  # Higher risk when agents disagree
+        
+        return min(1.0, max(0.0, combined_risk))
+    
+    def _determine_resolution_path_from_ticket(self, ticket: SupportTicket) -> str:
+        """Determine resolution path based on ticket analysis"""
+        confidence = ticket.confidence_score or 0.0
+        risk = ticket.risk_score or 1.0
+        
+        # High confidence and low risk -> automated resolution
+        if confidence >= self.confidence_threshold and risk <= self.risk_threshold:
+            return "automated_resolution"
+        
+        # Check for critical priority override
+        if ticket.priority == 'critical':
+            return "escalation"
+        
+        # Otherwise escalate to human
+        return "escalation"
+    
+    async def _handle_automated_resolution_with_db(self, ticket: SupportTicket, db_session: Session) -> None:
+        """Handle automated resolution with database persistence"""
+        try:
+            # Use advanced agent manager for solution generation
+            if self.advanced_agent_manager:
+                solution_task = {
+                    'query': ticket.message,
+                    'context': ticket.user_context,
+                    'ticket_id': str(ticket.id),
+                    'confidence_score': ticket.confidence_score,
+                    'task_type': 'solution_generation'
+                }
+                
+                solution_result = await self.advanced_agent_manager.execute_swarm_task(
+                    solution_task, ['research', 'confidence']
+                )
+                
+                # Create solution record
+                from db.crud import SolutionCRUD
+                solution = SolutionCRUD.create_solution(
+                    db_session,
+                    title=f"Automated solution for: {ticket.message[:50]}...",
+                    content=solution_result.get('solution_content', 'No solution generated'),
+                    solution_type='automated',
+                    steps=solution_result.get('steps', []),
+                    category=solution_result.get('category', 'general'),
+                    keywords=solution_result.get('keywords', []),
+                    agent_confidence=solution_result.get('confidence', 0.0)
+                )
+                
+                # Update ticket with solution
+                ticket.solution_id = str(solution.id)
+                ticket.status = SupportRequestStatus.AI_AUTO.value
+                ticket.resolved_at = datetime.utcnow()
+                ticket.updated_at = datetime.utcnow()
+                
+                db_session.commit()
+                
+            else:
+                # Fallback to basic resolution
+                ticket.status = SupportRequestStatus.AI_AUTO.value
+                ticket.resolved_at = datetime.utcnow()
+                ticket.updated_at = datetime.utcnow()
+                db_session.commit()
+                
+        except Exception as e:
+            logging.error(f"Automated resolution failed for ticket {ticket.id}: {e}")
+            # Fall back to escalation
+            await self._handle_escalation_with_db(ticket, db_session)
+    
+    async def _handle_escalation_with_db(self, ticket: SupportTicket, db_session: Session) -> None:
+        """Handle escalation to human with database persistence"""
+        try:
+            # Enrich context for human expert
+            enriched_context = await self._enrich_context_for_human_with_db(ticket)
+            
+            # Update ticket status
+            from db.crud import SupportTicketCRUD
+            escalation_reason = self._get_escalation_reason_from_ticket(ticket)
+            
+            SupportTicketCRUD.escalate_ticket(
+                db_session,
+                ticket_id=str(ticket.id),
+                escalation_reason=escalation_reason,
+                human_assignee=None  # Will be assigned later
+            )
+            
+            # Store enriched context in ticket metadata
+            ticket.triage_analysis = ticket.triage_analysis or {}
+            ticket.triage_analysis['enriched_context'] = enriched_context
+            
+            db_session.commit()
+            
+        except Exception as e:
+            logging.error(f"Escalation failed for ticket {ticket.id}: {e}")
+            # Set basic escalation status
+            ticket.status = SupportRequestStatus.ESCALATED.value
+            ticket.escalation_reason = f"Processing error: {str(e)}"
+            ticket.escalated_at = datetime.utcnow()
+            ticket.updated_at = datetime.utcnow()
+            db_session.commit()
+    
+    async def _perform_triage_evaluation_fallback(self, message: str, user_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback triage evaluation when advanced agent manager is not available"""
+        # Create temporary request object for compatibility with existing methods
+        temp_request = type('SupportRequest', (), {
+            'message': message,
+            'user_context': user_context,
+            'priority': self._determine_priority(message, user_context),
+            'id': str(uuid.uuid4())
+        })()
+        
+        # Use original triage evaluation logic
+        return await self._perform_original_triage_evaluation(temp_request)
+    
+    async def _enrich_context_for_human_with_db(self, ticket: SupportTicket) -> Dict[str, Any]:
+        """Enrich context for human expert using database"""
+        enriched = {
+            'ai_analysis': {
+                'confidence_score': ticket.confidence_score,
+                'risk_score': ticket.risk_score,
+                'priority': ticket.priority,
+                'triage_analysis': ticket.triage_analysis
+            },
+            'user_context': ticket.user_context,
+            'similar_cases': [],
+            'suggested_actions': [],
+            'ticket_history': []
+        }
+        
+        # Find similar tickets using database
+        try:
+            from db.crud import SupportTicketCRUD
+            db_session = get_db_session()
+            
+            # Get recent similar tickets (simple keyword matching)
+            similar_tickets = db_session.query(SupportTicket).filter(
+                SupportTicket.id != ticket.id,
+                SupportTicket.message.ilike(f'%{ticket.message[:20]}%')
+            ).limit(5).all()
+            
+            enriched['similar_cases'] = [
+                {
+                    'id': str(t.id),
+                    'message': t.message,
+                    'status': t.status,
+                    'resolution': t.solution_id,
+                    'confidence': t.confidence_score
+                } for t in similar_tickets
+            ]
+            
+            db_session.close()
+            
+        except Exception as e:
+            logging.error(f"Failed to enrich context for ticket {ticket.id}: {e}")
+            enriched['enrichment_error'] = str(e)
+        
+        return enriched
+    
+    def _get_escalation_reason_from_ticket(self, ticket: SupportTicket) -> str:
+        """Get escalation reason from ticket analysis"""
+        confidence = ticket.confidence_score or 0.0
+        risk = ticket.risk_score or 1.0
+        
+        if confidence < self.confidence_threshold:
+            return f"Low confidence score ({confidence:.2f}) - requires human expertise"
+        
+        if risk > self.risk_threshold:
+            return f"High risk score ({risk:.2f}) - requires human oversight"
+        
+        if ticket.priority == 'critical':
+            return "Critical priority issue - requires immediate human attention"
         
         return "Complex issue requiring human intervention"
     

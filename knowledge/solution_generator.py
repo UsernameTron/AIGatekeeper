@@ -88,9 +88,10 @@ class KnowledgeBaseSolutionGenerator:
     and integrates with the vector database for intelligent solution creation.
     """
     
-    def __init__(self, agent_manager=None, search_system=None):
+    def __init__(self, agent_manager=None, advanced_agent_manager=None, search_system=None):
         """Initialize the solution generator."""
         self.agent_manager = agent_manager
+        self.advanced_agent_manager = advanced_agent_manager
         self.search_system = search_system
         
         # Solution templates and patterns

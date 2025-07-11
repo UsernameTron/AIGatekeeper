@@ -222,6 +222,21 @@ class PerformanceTracker:
         labels = {"reason": reason}
         self.metrics.counter("escalations_total", 1.0, labels)
     
+    def track_feedback(self, outcome: str, rating: int = None, confidence_accuracy: float = None, processing_time: float = None):
+        """Track feedback submission and learning metrics."""
+        labels = {"outcome": outcome}
+        
+        self.metrics.counter("feedback_total", 1.0, labels)
+        
+        if rating is not None:
+            self.metrics.histogram("feedback_rating", rating, labels)
+        
+        if confidence_accuracy is not None:
+            self.metrics.histogram("confidence_accuracy", confidence_accuracy, labels)
+        
+        if processing_time is not None:
+            self.metrics.histogram("feedback_processing_time", processing_time, labels)
+    
     def get_performance_summary(self, hours: int = 1) -> Dict[str, Any]:
         """Get performance summary for the last N hours."""
         since = time.time() - (hours * 3600)
@@ -324,6 +339,46 @@ def dashboard_endpoint():
             "issues": health.issues
         },
         "performance": performance
+    })
+
+@monitoring_bp.route('/feedback-analytics', methods=['GET'])
+def feedback_analytics_endpoint():
+    """Feedback analytics endpoint."""
+    hours = request.args.get('hours', default=24, type=int)
+    since = time.time() - (hours * 3600)
+    
+    # Get feedback metrics
+    feedback_metrics = metrics_collector.get_metrics("feedback_total", since)
+    rating_metrics = metrics_collector.get_metrics("feedback_rating", since)
+    accuracy_metrics = metrics_collector.get_metrics("confidence_accuracy", since)
+    
+    # Calculate analytics
+    total_feedback = len(feedback_metrics.get("points", []))
+    
+    # Group by outcome
+    outcome_counts = {}
+    for point in feedback_metrics.get("points", []):
+        outcome = point.get("labels", {}).get("outcome", "unknown")
+        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+    
+    # Calculate average rating
+    ratings = [p["value"] for p in rating_metrics.get("points", [])]
+    avg_rating = sum(ratings) / len(ratings) if ratings else 0
+    
+    # Calculate confidence accuracy
+    accuracies = [p["value"] for p in accuracy_metrics.get("points", [])]
+    avg_accuracy = sum(accuracies) / len(accuracies) if accuracies else 0
+    
+    return jsonify({
+        "timestamp": datetime.now().isoformat(),
+        "period_hours": hours,
+        "feedback_analytics": {
+            "total_feedback": total_feedback,
+            "outcomes": outcome_counts,
+            "average_rating": round(avg_rating, 2),
+            "average_confidence_accuracy": round(avg_accuracy, 3),
+            "resolution_rate": outcome_counts.get("resolved", 0) / total_feedback if total_feedback > 0 else 0
+        }
     })
 
 def _format_prometheus_metrics(since: float = None) -> str:
