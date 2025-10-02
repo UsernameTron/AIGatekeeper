@@ -19,6 +19,9 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from core.support_request_processor import SupportRequestProcessor, SupportRequest, SupportRequestStatus
 from knowledge.solution_generator import KnowledgeBaseSolutionGenerator, SolutionType
 from monitoring.metrics_system import metrics_collector, performance_tracker, track_execution
+from auth.middleware import auth_required, optional_auth
+from integrations.validators import RequestValidator, limit_content_length
+from core.rate_limiter import limiter, get_rate_limit
 
 
 # Create Blueprint for AI Gatekeeper routes
@@ -78,11 +81,14 @@ def register_ai_gatekeeper_routes(app):
 
 
 @ai_gatekeeper_bp.route('/evaluate', methods=['POST'])
+@auth_required
+@limiter.limit(get_rate_limit('ai_processing'))
+@limit_content_length(100000)  # 100KB max
 @track_execution('support_request_evaluation')
 def evaluate_support_request():
     """
     Main AI Gatekeeper endpoint for evaluating support requests.
-    
+
     Expected JSON payload:
     {
         "message": "Support request description",
@@ -98,14 +104,17 @@ def evaluate_support_request():
         # Validate request
         if not request.is_json:
             return jsonify({'error': 'Request must be JSON'}), 400
-        
+
         data = request.get_json()
-        
-        # Extract required fields
+
+        # Apply comprehensive validation
+        try:
+            data = RequestValidator.validate_support_request(data)
+        except ValueError as e:
+            return jsonify({'error': 'Validation failed', 'details': str(e)}), 400
+
+        # Extract validated fields
         message = data.get('message', '').strip()
-        if not message:
-            return jsonify({'error': 'Message is required'}), 400
-        
         user_context = data.get('context', {})
         
         # Ensure support processor is available
@@ -196,6 +205,9 @@ def evaluate_support_request():
 
 
 @ai_gatekeeper_bp.route('/generate-solution', methods=['POST'])
+@auth_required
+@limiter.limit(get_rate_limit('ai_processing'))
+@limit_content_length(100000)
 @track_execution('solution_generation')
 def generate_solution():
     """
@@ -296,6 +308,8 @@ def generate_solution():
 
 
 @ai_gatekeeper_bp.route('/status/<request_id>', methods=['GET'])
+@auth_required
+@limiter.limit(get_rate_limit('status'))
 def get_request_status(request_id: str):
     """
     Get the current status of a support request.
@@ -340,6 +354,7 @@ def get_request_status(request_id: str):
 
 
 @ai_gatekeeper_bp.route('/active-requests', methods=['GET'])
+@auth_required
 def get_active_requests():
     """
     Get all active support requests.
@@ -479,14 +494,17 @@ def slack_integration():
 
 
 @ai_gatekeeper_bp.route('/feedback', methods=['POST'])
+@auth_required
+@limiter.limit(get_rate_limit('feedback'))
+@limit_content_length(50000)  # 50KB max
 @track_execution('feedback_submission')
 def submit_feedback():
     """
     Enhanced feedback submission with database persistence and confidence weight updates.
-    
+
     Expected JSON payload:
     {
-        "request_id": "Request ID", 
+        "request_id": "Request ID",
         "solution_id": "Solution ID (optional)",
         "rating": 1-5,
         "feedback": "Text feedback",
@@ -499,10 +517,16 @@ def submit_feedback():
     try:
         if not request.is_json:
             return jsonify({'error': 'Request must be JSON'}), 400
-        
+
         data = request.get_json()
-        
-        # Extract feedback fields
+
+        # Apply comprehensive validation
+        try:
+            data = RequestValidator.validate_feedback(data)
+        except ValueError as e:
+            return jsonify({'error': 'Validation failed', 'details': str(e)}), 400
+
+        # Extract validated fields
         request_id = data.get('request_id')
         solution_id = data.get('solution_id')
         rating = data.get('rating')
@@ -733,6 +757,8 @@ def format_escalation_for_slack(support_request: SupportRequest) -> str:
 
 
 @ai_gatekeeper_bp.route('/health', methods=['GET'])
+@optional_auth
+@limiter.limit(get_rate_limit('health'))
 def health_check():
     """Enhanced health check endpoint for AI Gatekeeper system."""
     try:
@@ -1084,6 +1110,9 @@ def check_slack_integration_health() -> Dict[str, Any]:
 
 
 @ai_gatekeeper_bp.route('/handoff', methods=['POST'])
+@auth_required
+@limiter.limit(get_rate_limit('ai_processing'))
+@limit_content_length(100000)
 @track_execution('human_handoff')
 def handoff_to_human():
     """
@@ -1190,6 +1219,7 @@ def handoff_to_human():
 
 
 @ai_gatekeeper_bp.route('/handoff/<ticket_id>/status', methods=['GET'])
+@auth_required
 def get_handoff_status(ticket_id: str):
     """
     Get the current status of a human handoff.

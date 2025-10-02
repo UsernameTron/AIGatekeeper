@@ -5,7 +5,7 @@ CRUD operations for AI Gatekeeper database
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, or_
 import json
 import uuid
 
@@ -13,6 +13,7 @@ from .models import (
     SupportTicket, Solution, SupportFeedback, KnowledgeBase,
     AgentPerformance, SwarmExecution, SupportRequestStatus
 )
+from .validators import InputValidator
 
 class SupportTicketCRUD:
     """CRUD operations for support tickets"""
@@ -175,21 +176,45 @@ class SolutionCRUD:
         return solution
     
     @staticmethod
-    def search_solutions(db: Session, query: str, category: str = None, 
+    def search_solutions(db: Session, query: str, category: str = None,
                         limit: int = 10) -> List[Solution]:
-        """Search solutions by content"""
-        query_filter = db.query(Solution)
-        
-        if category:
-            query_filter = query_filter.filter(Solution.category == category)
-        
-        # Simple text search - replace with vector search later
-        query_filter = query_filter.filter(
-            Solution.content.ilike(f'%{query}%') |
-            Solution.title.ilike(f'%{query}%')
+        """
+        Search solutions by content - SQL injection safe.
+
+        Args:
+            db: Database session
+            query: Search query (will be validated)
+            category: Optional category filter (will be validated)
+            limit: Maximum results to return
+
+        Returns:
+            List of matching solutions
+
+        Raises:
+            ValueError: If query or category validation fails
+        """
+        # Validate and sanitize inputs
+        validated_query = InputValidator.validate_search_query(query)
+        validated_limit = InputValidator.validate_integer(
+            limit, min_val=1, max_val=100, field_name="limit"
         )
-        
-        return query_filter.order_by(desc(Solution.success_rate)).limit(limit).all()
+
+        query_filter = db.query(Solution)
+
+        # Validate category if provided
+        if category:
+            validated_category = InputValidator.validate_category(category)
+            query_filter = query_filter.filter(Solution.category == validated_category)
+
+        # Create safe search filter using parameterized queries
+        search_filter = InputValidator.create_safe_search_filter(
+            Solution,
+            validated_query,
+            ['content', 'title']
+        )
+        query_filter = query_filter.filter(search_filter)
+
+        return query_filter.order_by(desc(Solution.success_rate)).limit(validated_limit).all()
 
 class FeedbackCRUD:
     """CRUD operations for feedback"""
@@ -251,21 +276,45 @@ class KnowledgeBaseCRUD:
         ).order_by(desc(KnowledgeBase.effectiveness_score)).limit(limit).all()
     
     @staticmethod
-    def search_knowledge(db: Session, query: str, category: str = None, 
+    def search_knowledge(db: Session, query: str, category: str = None,
                         limit: int = 10) -> List[KnowledgeBase]:
-        """Search knowledge base"""
-        query_filter = db.query(KnowledgeBase)
-        
-        if category:
-            query_filter = query_filter.filter(KnowledgeBase.category == category)
-        
-        # Simple text search - replace with vector search later
-        query_filter = query_filter.filter(
-            KnowledgeBase.content.ilike(f'%{query}%') |
-            KnowledgeBase.title.ilike(f'%{query}%')
+        """
+        Search knowledge base - SQL injection safe.
+
+        Args:
+            db: Database session
+            query: Search query (will be validated)
+            category: Optional category filter (will be validated)
+            limit: Maximum results to return
+
+        Returns:
+            List of matching knowledge base items
+
+        Raises:
+            ValueError: If query or category validation fails
+        """
+        # Validate and sanitize inputs
+        validated_query = InputValidator.validate_search_query(query)
+        validated_limit = InputValidator.validate_integer(
+            limit, min_val=1, max_val=100, field_name="limit"
         )
-        
-        return query_filter.order_by(desc(KnowledgeBase.effectiveness_score)).limit(limit).all()
+
+        query_filter = db.query(KnowledgeBase)
+
+        # Validate category if provided
+        if category:
+            validated_category = InputValidator.validate_category(category)
+            query_filter = query_filter.filter(KnowledgeBase.category == validated_category)
+
+        # Create safe search filter using parameterized queries
+        search_filter = InputValidator.create_safe_search_filter(
+            KnowledgeBase,
+            validated_query,
+            ['content', 'title']
+        )
+        query_filter = query_filter.filter(search_filter)
+
+        return query_filter.order_by(desc(KnowledgeBase.effectiveness_score)).limit(validated_limit).all()
     
     @staticmethod
     def update_knowledge_effectiveness(db: Session, kb_id: Union[str, uuid.UUID], effective: bool) -> Optional[KnowledgeBase]:

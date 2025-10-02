@@ -14,6 +14,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared_agents'))
 
 from shared_agents.core.agent_factory import AgentBase, AgentResponse, AgentCapability
+from core.ai_tracking import track_openai_completion
 
 class AdvancedTriageAgent(AgentBase):
     """
@@ -133,11 +134,14 @@ Be concise and accurate."""
                 temperature=0.1,
                 max_tokens=300
             )
-            
+
+            # Track AI usage
+            track_openai_completion(response, agent_type='triage')
+
             content = response.choices[0].message.content.strip()
             if content.startswith('```json'):
                 content = content.split('```json')[1].split('```')[0]
-            
+
             return json.loads(content)
             
         except Exception as e:
@@ -186,11 +190,14 @@ Be thorough and analytical."""
                 temperature=0.2,
                 max_tokens=800
             )
-            
+
+            # Track AI usage
+            track_openai_completion(response, agent_type='triage')
+
             content = response.choices[0].message.content.strip()
             if content.startswith('```json'):
                 content = content.split('```json')[1].split('```')[0]
-            
+
             return json.loads(content)
             
         except Exception as e:

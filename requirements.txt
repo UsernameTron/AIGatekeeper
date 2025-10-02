@@ -7,7 +7,11 @@ python-dotenv>=0.19.0
 # Web Framework
 flask>=2.3.0
 flask-cors>=4.0.0
+flask-limiter>=3.5.0
 werkzeug>=2.3.0
+
+# Security
+bleach>=6.0.0
 
 # HTTP and API
 requests>=2.25.0
@@ -22,6 +26,10 @@ asyncio
 # Testing (minimal)
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
+
+# Database
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
 
 # Vector Database (for knowledge base)
 chromadb>=0.4.0

@@ -14,6 +14,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared_agents'))
 
 from shared_agents.core.agent_factory import AgentBase, AgentResponse, AgentCapability
+from core.ai_tracking import track_openai_completion
 
 class AdvancedResearchAgent(AgentBase):
     """
@@ -167,7 +168,10 @@ Return as a single expanded search string."""
                 temperature=0.3,
                 max_tokens=200
             )
-            
+
+            # Track AI usage
+            track_openai_completion(response, agent_type='research')
+
             return response.choices[0].message.content.strip()
             
         except Exception as e:

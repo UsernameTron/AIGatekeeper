@@ -346,29 +346,29 @@ def feedback_analytics_endpoint():
     """Feedback analytics endpoint."""
     hours = request.args.get('hours', default=24, type=int)
     since = time.time() - (hours * 3600)
-    
+
     # Get feedback metrics
     feedback_metrics = metrics_collector.get_metrics("feedback_total", since)
     rating_metrics = metrics_collector.get_metrics("feedback_rating", since)
     accuracy_metrics = metrics_collector.get_metrics("confidence_accuracy", since)
-    
+
     # Calculate analytics
     total_feedback = len(feedback_metrics.get("points", []))
-    
+
     # Group by outcome
     outcome_counts = {}
     for point in feedback_metrics.get("points", []):
         outcome = point.get("labels", {}).get("outcome", "unknown")
         outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
-    
+
     # Calculate average rating
     ratings = [p["value"] for p in rating_metrics.get("points", [])]
     avg_rating = sum(ratings) / len(ratings) if ratings else 0
-    
+
     # Calculate confidence accuracy
     accuracies = [p["value"] for p in accuracy_metrics.get("points", [])]
     avg_accuracy = sum(accuracies) / len(accuracies) if accuracies else 0
-    
+
     return jsonify({
         "timestamp": datetime.now().isoformat(),
         "period_hours": hours,
@@ -379,6 +379,57 @@ def feedback_analytics_endpoint():
             "average_confidence_accuracy": round(avg_accuracy, 3),
             "resolution_rate": outcome_counts.get("resolved", 0) / total_feedback if total_feedback > 0 else 0
         }
+    })
+
+@monitoring_bp.route('/ai-usage', methods=['GET'])
+def ai_usage_endpoint():
+    """AI usage and cost tracking endpoint."""
+    from monitoring.ai_metrics import ai_metrics_tracker
+
+    days = request.args.get('days', default=7, type=int)
+    summary = ai_metrics_tracker.get_usage_summary(days)
+
+    return jsonify({
+        'timestamp': datetime.now().isoformat(),
+        'usage': summary
+    })
+
+@monitoring_bp.route('/ai-cost-alerts', methods=['GET'])
+def ai_cost_alerts_endpoint():
+    """AI cost alerts endpoint."""
+    from monitoring.ai_metrics import ai_metrics_tracker
+
+    threshold = request.args.get('threshold', default=50.0, type=float)
+    alerts = ai_metrics_tracker.get_cost_alerts(threshold)
+
+    return jsonify({
+        'timestamp': datetime.now().isoformat(),
+        'cost_alerts': alerts
+    })
+
+@monitoring_bp.route('/ai-realtime', methods=['GET'])
+def ai_realtime_endpoint():
+    """AI real-time statistics endpoint."""
+    from monitoring.ai_metrics import ai_metrics_tracker
+
+    stats = ai_metrics_tracker.get_realtime_stats()
+
+    return jsonify({
+        'timestamp': datetime.now().isoformat(),
+        'realtime_stats': stats
+    })
+
+@monitoring_bp.route('/db-pool-status', methods=['GET'])
+def db_pool_status_endpoint():
+    """Database connection pool status endpoint."""
+    from db.database import db_manager
+
+    pool_status = db_manager.get_pool_status()
+
+    return jsonify({
+        'timestamp': datetime.now().isoformat(),
+        'pool_status': pool_status,
+        'healthy': pool_status.get('checked_out', 0) < pool_status.get('total_capacity', 0)
     })
 
 def _format_prometheus_metrics(since: float = None) -> str:

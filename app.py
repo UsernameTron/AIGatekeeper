@@ -82,17 +82,65 @@ async def initialize_advanced_agents(app):
     print("✅ Advanced agent system initialized")
     return agent_manager
 
+def validate_environment():
+    """Validate environment configuration before starting app."""
+    print("🔐 Validating environment configuration...")
+
+    # Import and run secrets validator
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'scripts'))
+    try:
+        from validate_secrets import validate_secrets
+        if not validate_secrets():
+            print("\n❌ Environment validation failed!")
+            print("Please fix the errors above before starting the application.")
+            sys.exit(1)
+    except ImportError as e:
+        print(f"⚠️  Could not import secrets validator: {e}")
+        # Continue but warn
+
+    print("✅ Environment validation passed\n")
+
 def create_app():
     """Create and configure the AI Gatekeeper Flask application."""
+    # Initialize logging first (before anything else)
+    from core.logging_config import setup_logging, init_audit_logger
+    setup_logging()
+    init_audit_logger()
+
+    # Validate environment
+    validate_environment()
+
     app = Flask(__name__)
-    
+
     # Enable CORS
     CORS(app)
-    
-    # Basic configuration
-    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'ai-gatekeeper-dev-key')
+
+    # Basic configuration - SECRET_KEY must be set
+    secret_key = os.getenv('SECRET_KEY')
+    if not secret_key:
+        raise ValueError(
+            "SECRET_KEY environment variable must be set. "
+            "This is different from JWT_SECRET_KEY and is used for Flask sessions."
+        )
+    app.config['SECRET_KEY'] = secret_key
     app.config['DEBUG'] = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
-    
+
+    # Add logging middleware
+    try:
+        from integrations.logging_middleware import add_logging_middleware
+        add_logging_middleware(app)
+        print("✅ Logging middleware initialized successfully")
+    except Exception as logging_error:
+        print(f"⚠️  Logging middleware initialization failed: {logging_error}")
+
+    # Initialize rate limiter
+    try:
+        from core.rate_limiter import init_rate_limiter
+        init_rate_limiter(app)
+        print("✅ Rate limiter initialized successfully")
+    except Exception as rate_limit_error:
+        print(f"⚠️  Rate limiter initialization failed: {rate_limit_error}")
+
     # Initialize AI Gatekeeper components
     try:
         # Import and register AI Gatekeeper routes
@@ -100,9 +148,14 @@ def create_app():
         register_ai_gatekeeper_routes(app)
         
         # Initialize monitoring system
-        from monitoring.metrics_system import monitoring_bp, initialize_health_checks
+        from monitoring.metrics_system import monitoring_bp, initialize_health_checks, metrics_collector
+        from monitoring.ai_metrics import init_ai_metrics
         app.register_blueprint(monitoring_bp)
-        
+
+        # Initialize AI metrics tracking
+        init_ai_metrics(metrics_collector)
+        print("✅ AI metrics tracking initialized")
+
         # Initialize health checks (will be improved when components are available)
         try:
             initialize_health_checks(None, None, None)

@@ -23,17 +23,34 @@ class AuthorizationError(Exception):
 class JWTManager:
     """JWT token manager for AI Gatekeeper authentication."""
     
-    def __init__(self, secret_key: str = None, algorithm: str = 'HS256', 
+    def __init__(self, secret_key: str = None, algorithm: str = 'HS256',
                  token_expiry_hours: int = 24):
         """
         Initialize JWT manager.
-        
+
         Args:
             secret_key: Secret key for JWT signing
             algorithm: JWT algorithm (default: HS256)
             token_expiry_hours: Token expiry in hours (default: 24)
+
+        Raises:
+            ValueError: If JWT_SECRET_KEY is not set or is too short
         """
-        self.secret_key = secret_key or os.getenv('JWT_SECRET_KEY', 'ai-gatekeeper-secret')
+        self.secret_key = secret_key or os.getenv('JWT_SECRET_KEY')
+
+        # Validate secret key exists and is strong
+        if not self.secret_key or self.secret_key.strip() == '':
+            raise ValueError(
+                "JWT_SECRET_KEY environment variable must be set. "
+                "Run 'python scripts/validate_secrets.py' to check configuration."
+            )
+
+        if len(self.secret_key) < 32:
+            raise ValueError(
+                f"JWT_SECRET_KEY must be at least 32 characters (got {len(self.secret_key)}). "
+                "Please use a strong, randomly generated secret."
+            )
+
         self.algorithm = algorithm
         self.token_expiry_hours = token_expiry_hours
         
@@ -182,9 +199,14 @@ class BearerTokenManager:
         self.api_keys = self._load_api_keys()
     
     def _load_api_keys(self) -> Dict[str, Dict[str, Any]]:
-        """Load API keys from environment or configuration."""
+        """
+        Load API keys from environment or configuration.
+
+        Raises:
+            ValueError: If no API keys are configured
+        """
         api_keys = {}
-        
+
         # Load from environment variables
         # Format: API_KEY_<NAME>=<key>:<role>
         for key, value in os.environ.items():
@@ -192,21 +214,42 @@ class BearerTokenManager:
                 name = key[8:]  # Remove 'API_KEY_' prefix
                 if ':' in value:
                     api_key, role = value.split(':', 1)
+
+                    # Validate API key strength
+                    if len(api_key) < 16:
+                        logging.warning(
+                            f"API key {name} is too short (min 16 characters recommended)"
+                        )
+
+                    # Validate role
+                    allowed_roles = ['admin', 'operator', 'viewer', 'api_user']
+                    if role not in allowed_roles:
+                        logging.warning(
+                            f"API key {name} has invalid role '{role}'. "
+                            f"Allowed: {allowed_roles}"
+                        )
+                        continue
+
                     api_keys[api_key] = {
                         'name': name,
                         'role': role,
                         'permissions': JWTManager().roles.get(role, [])
                     }
-        
-        # Default admin key if none configured
+                else:
+                    logging.warning(
+                        f"API key {key} has invalid format. "
+                        "Expected format: <key>:<role>"
+                    )
+
+        # SECURITY: No default keys - fail if none configured
         if not api_keys:
-            default_key = os.getenv('DEFAULT_API_KEY', 'ai-gatekeeper-default-key')
-            api_keys[default_key] = {
-                'name': 'DEFAULT_ADMIN',
-                'role': 'admin',
-                'permissions': ['read', 'write', 'delete', 'manage']
-            }
-        
+            raise ValueError(
+                "No API keys configured. Set API_KEY_* environment variables.\n"
+                "Example: export API_KEY_ADMIN='your-secure-key-here:admin'\n"
+                "Run 'python scripts/validate_secrets.py' for validation."
+            )
+
+        logging.info(f"Loaded {len(api_keys)} API key(s)")
         return api_keys
     
     def validate_token(self, token: str) -> Optional[Dict[str, Any]]:
@@ -236,43 +279,86 @@ def extract_token_from_request() -> Optional[str]:
 
 def authenticate_request() -> Dict[str, Any]:
     """
-    Authenticate request using JWT or Bearer token.
-    
+    Authenticate request using JWT or Bearer token with audit logging.
+
     Returns:
         User info dictionary
-        
+
     Raises:
         AuthenticationError: If authentication fails
     """
+    from core.logging_config import get_audit_logger
+
     token = extract_token_from_request()
-    
+    ip_address = request.remote_addr
+    audit_logger = get_audit_logger()
+
     if not token:
+        audit_logger.log_authentication(
+            user_id='unknown',
+            method='token',
+            success=False,
+            ip_address=ip_address,
+            details={'reason': 'no_token_provided'}
+        )
         raise AuthenticationError("No authentication token provided")
-    
+
     # Try JWT first
     try:
         payload = jwt_manager.decode_token(token)
-        return {
+        user_info = {
             'user_id': payload.get('user_id'),
             'email': payload.get('email'),
             'role': payload.get('role'),
             'permissions': payload.get('permissions', []),
             'token_type': 'jwt'
         }
-    except AuthenticationError:
+
+        audit_logger.log_authentication(
+            user_id=user_info['user_id'],
+            method='jwt',
+            success=True,
+            ip_address=ip_address
+        )
+
+        return user_info
+
+    except AuthenticationError as e:
+        # JWT failed, try bearer token
         pass
-    
+
     # Try Bearer token
-    token_info = bearer_token_manager.validate_token(token)
-    if token_info:
-        return {
-            'user_id': token_info['name'],
-            'email': None,
-            'role': token_info['role'],
-            'permissions': token_info['permissions'],
-            'token_type': 'bearer'
-        }
-    
+    try:
+        token_info = bearer_token_manager.validate_token(token)
+        if token_info:
+            user_info = {
+                'user_id': token_info['name'],
+                'email': None,
+                'role': token_info['role'],
+                'permissions': token_info['permissions'],
+                'token_type': 'bearer'
+            }
+
+            audit_logger.log_authentication(
+                user_id=user_info['user_id'],
+                method='bearer',
+                success=True,
+                ip_address=ip_address
+            )
+
+            return user_info
+    except Exception:
+        pass
+
+    # Both methods failed
+    audit_logger.log_authentication(
+        user_id='unknown',
+        method='token',
+        success=False,
+        ip_address=ip_address,
+        details={'reason': 'invalid_token'}
+    )
+
     raise AuthenticationError("Invalid authentication token")
 
 def authorize_request(user_info: Dict[str, Any], method: str, path: str) -> bool:
