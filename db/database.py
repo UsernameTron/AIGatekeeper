@@ -12,6 +12,11 @@ from contextlib import contextmanager
 
 from .models import Base
 
+
+class ConnectionPoolExhaustedException(Exception):
+    """Raised when connection pool is exhausted and cannot acquire connection."""
+    pass
+
 class DatabaseManager:
     """Manages database connections and sessions with production-grade pooling"""
 
@@ -118,11 +123,50 @@ class DatabaseManager:
         finally:
             session.close()
 
-    def get_session(self):
-        """Get a database session"""
+    def get_session(self, timeout: int = 30, max_retries: int = 3):
+        """
+        Get a database session with timeout and retry logic.
+
+        Args:
+            timeout: Maximum time to wait for connection (seconds)
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            Database session
+
+        Raises:
+            ConnectionPoolExhaustedException: If pool is exhausted after retries
+            RuntimeError: If database not initialized
+        """
         if not self.Session:
             raise RuntimeError("Database not initialized")
-        return self.Session()
+
+        retry_delay = 1  # seconds
+        for attempt in range(max_retries):
+            try:
+                # Try to get session
+                session = self.Session()
+                # Test connection is alive
+                session.execute("SELECT 1")
+                return session
+            except (OperationalError, DisconnectionError) as e:
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (attempt + 1)  # Exponential backoff
+                    logging.warning(
+                        f"Connection pool exhausted or unavailable, "
+                        f"retry {attempt + 1}/{max_retries} after {wait_time}s"
+                    )
+                    time.sleep(wait_time)
+                else:
+                    logging.error("Failed to acquire database connection after retries")
+                    raise ConnectionPoolExhaustedException(
+                        "Database connection pool exhausted. Try again later."
+                    ) from e
+            except Exception as e:
+                logging.error(f"Unexpected error acquiring session: {e}")
+                raise
+
+        raise RuntimeError("Failed to acquire database session")
 
     def close_session(self):
         """Close scoped session"""
@@ -162,6 +206,35 @@ class DatabaseManager:
             'checked_in': self.engine.pool.checkedin(),
             'max_overflow': self.max_overflow,
             'total_capacity': self.pool_size + self.max_overflow
+        }
+
+    def get_pool_health(self) -> dict:
+        """Get pool health with thresholds."""
+        stats = self.get_pool_status()
+
+        if not stats:
+            return {
+                'healthy': False,
+                'status': 'unhealthy',
+                'error': 'Pool not initialized'
+            }
+
+        total_capacity = stats['total_capacity']
+        checked_out = stats['checked_out']
+        utilization = checked_out / total_capacity if total_capacity > 0 else 0
+
+        health_status = 'healthy'
+        if utilization > 0.9:
+            health_status = 'critical'
+        elif utilization > 0.7:
+            health_status = 'warning'
+
+        return {
+            **stats,
+            'utilization_percent': round(utilization * 100, 2),
+            'health_status': health_status,
+            'available_connections': total_capacity - checked_out,
+            'healthy': health_status == 'healthy'
         }
 
 # Global database manager instance

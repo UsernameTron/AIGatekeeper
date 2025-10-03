@@ -30,6 +30,16 @@ def add_logging_middleware(app):
         g.correlation_id = correlation_id
         g.request_start_time = time.time()
 
+        # Get trace context from OpenTelemetry if available
+        try:
+            from core.tracing import get_trace_context
+            trace_context = get_trace_context()
+            if trace_context.get('trace_id'):
+                g.trace_id = trace_context['trace_id']
+                g.span_id = trace_context['span_id']
+        except:
+            pass
+
         # Set context vars for structured logging
         request_id_var.set(correlation_id)
 
@@ -44,20 +54,25 @@ def add_logging_middleware(app):
             session_id_var.set(session_id)
 
         # Log request
+        extra_data = {
+            'event_type': 'request_start',
+            'correlation_id': correlation_id,
+            'method': request.method,
+            'path': request.path,
+            'remote_addr': request.remote_addr,
+            'user_agent': request.headers.get('User-Agent', ''),
+            'content_length': request.content_length,
+            'referrer': request.headers.get('Referer', '')
+        }
+
+        # Add trace IDs if available
+        if hasattr(g, 'trace_id'):
+            extra_data['trace_id'] = g.trace_id
+            extra_data['span_id'] = g.span_id
+
         logging.info(
             f"Request started: {request.method} {request.path}",
-            extra={
-                'extra_data': {
-                    'event_type': 'request_start',
-                    'correlation_id': correlation_id,
-                    'method': request.method,
-                    'path': request.path,
-                    'remote_addr': request.remote_addr,
-                    'user_agent': request.headers.get('User-Agent', ''),
-                    'content_length': request.content_length,
-                    'referrer': request.headers.get('Referer', '')
-                }
-            }
+            extra={'extra_data': extra_data}
         )
 
     @app.after_request

@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-gatekeeper-service
+  namespace: ai-gatekeeper
+  labels:
+    app: ai-gatekeeper
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+  selector:
+    app: ai-gatekeeper
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: ai-gatekeeper
+  labels:
+    app: postgres
+spec:
+  type: ClusterIP
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: 5432
+    protocol: TCP
+  selector:
+    app: postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: ai-gatekeeper
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+    protocol: TCP
+  selector:
+    app: redis
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chromadb-service
+  namespace: ai-gatekeeper
+  labels:
+    app: chromadb
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: chromadb

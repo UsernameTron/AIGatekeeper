@@ -37,6 +37,18 @@ chromadb>=0.4.0
 # Optional: Slack Integration
 slack-sdk>=3.19.0
 
+# Observability and Tracing
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-instrumentation-flask>=0.41b0
+opentelemetry-instrumentation-sqlalchemy>=0.41b0
+opentelemetry-instrumentation-requests>=0.41b0
+opentelemetry-exporter-otlp>=1.20.0
+
+# Circuit Breaker and Resilience
+pybreaker>=1.0.0
+tenacity>=8.2.0
+
 # Development Tools (minimal)
 black>=22.0.0
 isort>=5.10.0

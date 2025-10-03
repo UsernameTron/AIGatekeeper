@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/ai_gatekeeper
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - JWT_SECRET_KEY=dev-jwt-secret-key-change-in-production-min-32-characters
+      - SECRET_KEY=dev-flask-secret-key-change-in-production
+      - ADMIN_API_KEY=dev-admin-key-change-in-production
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+      - FLASK_DEBUG=true
+      - CHROMA_PERSIST_DIR=/app/chroma_data
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - .:/app  # Mount source code for hot reload
+      - chroma_data:/app/chroma_data
+    command: python app.py
+    networks:
+      - ai-gatekeeper-network
+
+  db:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"  # Expose for local connections
+    environment:
+      POSTGRES_DB: ai_gatekeeper
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    networks:
+      - ai-gatekeeper-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"  # Expose for local connections
+    networks:
+      - ai-gatekeeper-network
+
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - IS_PERSISTENT=TRUE
+    volumes:
+      - chroma_dev_data:/chroma/chroma
+    networks:
+      - ai-gatekeeper-network
+
+volumes:
+  postgres_dev_data:
+  chroma_data:
+  chroma_dev_data:
+
+networks:
+  ai-gatekeeper-network:
+    driver: bridge

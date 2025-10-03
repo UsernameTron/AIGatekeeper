@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-gatekeeper
+  labels:
+    name: ai-gatekeeper
+    environment: production

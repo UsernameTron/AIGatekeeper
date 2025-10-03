@@ -432,6 +432,24 @@ def db_pool_status_endpoint():
         'healthy': pool_status.get('checked_out', 0) < pool_status.get('total_capacity', 0)
     })
 
+@monitoring_bp.route('/circuit-breakers', methods=['GET'])
+def circuit_breakers_endpoint():
+    """Circuit breaker status endpoint."""
+    try:
+        from core.circuit_breaker import get_all_circuit_breakers_status
+
+        status = get_all_circuit_breakers_status()
+
+        return jsonify({
+            'timestamp': datetime.now().isoformat(),
+            'circuit_breakers': status
+        })
+    except ImportError:
+        return jsonify({
+            'timestamp': datetime.now().isoformat(),
+            'error': 'Circuit breakers not configured'
+        }), 503
+
 def _format_prometheus_metrics(since: float = None) -> str:
     """Format metrics in Prometheus format."""
     lines = []
@@ -449,18 +467,68 @@ def _format_prometheus_metrics(since: float = None) -> str:
     
     return "\n".join(lines)
 
+def track_database_pool():
+    """Track database pool metrics."""
+    from db.database import db_manager
+    import logging
+
+    try:
+        pool_health = db_manager.get_pool_health()
+
+        if not pool_health:
+            return
+
+        # Record metrics
+        metrics_collector.gauge('db_pool_utilization', pool_health.get('utilization_percent', 0))
+        metrics_collector.gauge('db_pool_available', pool_health.get('available_connections', 0))
+        metrics_collector.gauge('db_pool_checked_out', pool_health.get('checked_out', 0))
+
+        # Alert on critical status
+        health_status = pool_health.get('health_status', 'unknown')
+        if health_status == 'critical':
+            logging.critical(f"Database pool critical: {pool_health}")
+        elif health_status == 'warning':
+            logging.warning(f"Database pool warning: {pool_health}")
+    except Exception as e:
+        logging.error(f"Database pool monitoring error: {e}")
+
+def start_background_monitoring():
+    """Start background monitoring threads."""
+    import logging
+
+    def monitor_loop():
+        while True:
+            try:
+                track_database_pool()
+
+                # Track circuit breaker states
+                try:
+                    from core.circuit_breaker import track_circuit_breaker_metrics
+                    track_circuit_breaker_metrics()
+                except ImportError:
+                    pass  # Circuit breaker not available yet
+
+                time.sleep(60)  # Check every minute
+            except Exception as e:
+                logging.error(f"Monitoring loop error: {e}")
+                time.sleep(60)  # Continue on error
+
+    thread = threading.Thread(target=monitor_loop, daemon=True, name="BackgroundMonitor")
+    thread.start()
+    logging.info("Background monitoring thread started")
+
 def initialize_health_checks(support_processor, solution_generator, search_system):
     """Initialize health checks for system components."""
-    
+
     def check_support_processor():
         return support_processor is not None and support_processor.agent_manager is not None
-    
+
     def check_solution_generator():
         return solution_generator is not None
-    
+
     def check_search_system():
         return search_system is not None
-    
+
     def check_ai_service():
         # Simple AI service check - could ping OpenAI API
         try:
@@ -468,11 +536,24 @@ def initialize_health_checks(support_processor, solution_generator, search_syste
             return True
         except:
             return False
-    
+
+    def check_database_pool():
+        """Check database pool health."""
+        from db.database import db_manager
+        try:
+            pool_health = db_manager.get_pool_health()
+            return pool_health.get('healthy', False)
+        except:
+            return False
+
     health_checker.register_component("support_processor", check_support_processor)
     health_checker.register_component("solution_generator", check_solution_generator)
     health_checker.register_component("search_system", check_search_system)
     health_checker.register_component("ai_service", check_ai_service)
+    health_checker.register_component("database_pool", check_database_pool)
+
+    # Start background monitoring
+    start_background_monitoring()
 
 # Decorator for automatic metrics collection
 def track_execution(operation_name: str):

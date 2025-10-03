@@ -115,6 +115,16 @@ def create_app():
     # Enable CORS
     CORS(app)
 
+    # Setup distributed tracing
+    try:
+        from core.tracing import setup_tracing
+        tracer = setup_tracing(app=app)
+        if tracer:
+            app.tracer = tracer
+            print("✅ Distributed tracing initialized successfully")
+    except Exception as tracing_error:
+        print(f"⚠️  Tracing initialization failed: {tracing_error}")
+
     # Basic configuration - SECRET_KEY must be set
     secret_key = os.getenv('SECRET_KEY')
     if not secret_key:
@@ -125,6 +135,10 @@ def create_app():
     app.config['SECRET_KEY'] = secret_key
     app.config['DEBUG'] = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
 
+    # Request timeout configuration
+    app.config['REQUEST_TIMEOUT'] = int(os.getenv('REQUEST_TIMEOUT', '120'))  # 2 minutes default
+    app.config['OPENAI_TIMEOUT'] = int(os.getenv('OPENAI_TIMEOUT', '60'))  # 1 minute for AI calls
+
     # Add logging middleware
     try:
         from integrations.logging_middleware import add_logging_middleware
@@ -133,6 +147,14 @@ def create_app():
     except Exception as logging_error:
         print(f"⚠️  Logging middleware initialization failed: {logging_error}")
 
+    # Add timeout monitoring
+    try:
+        from core.timeout_middleware import add_timeout_monitoring
+        add_timeout_monitoring(app)
+        print("✅ Timeout monitoring initialized successfully")
+    except Exception as timeout_error:
+        print(f"⚠️  Timeout monitoring initialization failed: {timeout_error}")
+
     # Initialize rate limiter
     try:
         from core.rate_limiter import init_rate_limiter
@@ -140,6 +162,14 @@ def create_app():
         print("✅ Rate limiter initialized successfully")
     except Exception as rate_limit_error:
         print(f"⚠️  Rate limiter initialization failed: {rate_limit_error}")
+
+    # Add security headers
+    try:
+        from core.security_headers import add_security_headers
+        add_security_headers(app)
+        print("✅ Security headers middleware initialized successfully")
+    except Exception as security_error:
+        print(f"⚠️  Security headers initialization failed: {security_error}")
 
     # Initialize AI Gatekeeper components
     try:
